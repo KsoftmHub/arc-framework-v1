@@ -1,0 +1,48 @@
+{
+  "name": "@ksoftm/create-arc",
+  "version": "1.0.0",
+  "description": "Scaffold and manage ARC — plan-driven development for AI agents (Align → Refine → Construct). Pure-Markdown plans, tasks, worklogs and statuses in .arc/, for any language and any agent.",
+  "keywords": [
+    "arc",
+    "agents",
+    "agents-md",
+    "ai",
+    "ai-agents",
+    "plan-driven",
+    "planning",
+    "scaffold",
+    "claude",
+    "workflow"
+  ],
+  "license": "MIT",
+  "author": "Ksoftm (Kajalan)",
+  "type": "module",
+  "bin": {
+    "create-arc": "bin/cli.js"
+  },
+  "files": [
+    "bin",
+    "templates",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "test": "node --test"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/KsoftM/arc.git",
+    "directory": "packages/create-arc"
+  },
+  "homepage": "https://github.com/KsoftM/arc#readme",
+  "bugs": {
+    "url": "https://github.com/KsoftM/arc/issues"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  }
+}

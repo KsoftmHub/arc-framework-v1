@@ -1,0 +1,3 @@
+# the package.json "files" allowlist governs what ships;
+# this is a defensive net for the test dir.
+test/

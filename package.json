@@ -1,0 +1,32 @@
+{
+  "name": "arc-framework",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "ARC — plan-driven development for AI agents (Align → Refine → Construct), shipped as a Claude skill and an npm scaffolder.",
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "sync": "node tools/sync-templates.mjs",
+    "sync:check": "node tools/sync-templates.mjs --check",
+    "validate": "node tools/validate-skill.mjs",
+    "smoke": "python3 tools/smoke-test.py",
+    "package": "node tools/package-skill.mjs --out dist",
+    "test": "npm test --workspace @ksoftm/create-arc",
+    "check": "npm run sync:check && npm run validate && npm run smoke && npm test"
+  },
+  "license": "MIT",
+  "author": "Ksoftm (Kajalan)",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/KsoftM/arc.git"
+  },
+  "homepage": "https://github.com/KsoftM/arc#readme",
+  "bugs": {
+    "url": "https://github.com/KsoftM/arc/issues"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
