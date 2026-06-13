@@ -32,11 +32,18 @@ Requires Node ≥ 18.
 | Command | What it does |
 |---|---|
 | `init [dir]` | Scaffold `ARC.md` + `.arc/` (index, template, standing maintenance arc, `notes/`, `archive/`). Idempotent — never overwrites. |
-| `new "Title" [--dir=.] [--tags=a,b]` | Take the next sequential ID, create the arc from the template, and register its row in the index. |
+| `new "Title" [--goal …] [--task …] [--tags a,b]` | Take the next ID, create the arc, register its row. `--goal`/`--task` prefill the plan and tasks. |
+| `start <arc>` | Set an arc to in-progress and log it. `<arc>` is an id or slug. |
+| `task <arc> <n> [done\|start\|block\|cancel\|pending]` | Toggle a task marker; `--add "text"` appends a new task. |
+| `block <arc> [--reason …]` | Set an arc to blocked, recording the reason in the worklog. |
+| `done <arc>` | Mark done, log it, move the file to `archive/`, move its index row. |
+| `archive <arc> [--cancelled]` | Archive an arc (outcome done, or cancelled). |
+| `show <arc>` | Print one arc's plan, tasks, and status notes. |
+| `next` | Suggest what to work on next. |
 | `status [dir] [--json]` | Print a table (or JSON) of every arc: ID, status, plan version, task progress, and which to resume. |
-| `doctor [dir]` | Consistency checks — index ↔ file bijection, ID/`next_id` sanity, valid statuses. Exits non-zero on problems (CI-friendly). |
+| `doctor [dir] [--fix]` | Consistency checks — index ↔ file bijection, ID/`next_id` sanity, valid statuses. Exits non-zero on problems (CI-friendly). `--fix` auto-repairs drift. |
 
-Common options: `--owner NAME` (defaults to `git config user.name`); `--tags a,b` on `new`; `--json` on `status`; `--agents a,b` and `--force` on `agent-init`; `--version`, `--help`.
+Common options: `--owner NAME` (defaults to `git config user.name`); `--goal`/`--task` on `new`; `--reason` on `block`/`archive`; `--cancelled` on `archive`; `--fix` on `doctor`; `--json` on `status`; `--agents a,b` and `--force` on `agent-init`; `--version`, `--help`. Per-command help: `arc help <command>`.
 
 Installs two equivalent binaries: **`arc`** and **`create-arc`**.
 
