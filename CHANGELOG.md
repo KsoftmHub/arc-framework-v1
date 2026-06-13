@@ -3,6 +3,12 @@
 All notable changes to this project are documented here. This file is
 automatically maintained by semantic-release from Conventional Commits.
 
+## [1.4.0](https://github.com/KsoftmHub/arc-framework-v1/compare/v1.3.0...v1.4.0) (2026-06-13)
+
+### Features
+
+* **cli:** add refine/note/log commands, JSON output, and matching agent slash commands ([c33fcd5](https://github.com/KsoftmHub/arc-framework-v1/commit/c33fcd5c4e3fa9d204afecc4013bfc73603ac998))
+
 ## [1.3.0](https://github.com/KsoftmHub/arc-framework-v1/compare/v1.2.0...v1.3.0) (2026-06-13)
 
 ### Features
