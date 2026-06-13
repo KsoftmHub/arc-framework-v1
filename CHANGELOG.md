@@ -3,6 +3,12 @@
 All notable changes to this project are documented here. This file is
 automatically maintained by semantic-release from Conventional Commits.
 
+## [1.1.0](https://github.com/KsoftmHub/arc-framework-v1/compare/v1.0.7...v1.1.0) (2026-06-13)
+
+### Features
+
+* **cli:** add arc binary alias and agent-init slash commands; fix INDEX insertion ([a780c05](https://github.com/KsoftmHub/arc-framework-v1/commit/a780c0593f14d5df5187b95c44d5cd86eac69e10))
+
 ## [1.0.7](https://github.com/KsoftmHub/arc-framework-v1/compare/v1.0.6...v1.0.7) (2026-06-13)
 
 ### Bug Fixes
