@@ -1,5 +1,24 @@
 # Changelog
 
+All notable changes to this project are documented here. This file is
+automatically maintained by semantic-release from Conventional Commits.
+
+## 1.0.0 (2026-06-13)
+
+### Features
+
+* updated ([aeabce6](https://github.com/KsoftmHub/arc-framework-v1/commit/aeabce601d607ea04cc0899332a3f6d944572ade))
+* updated ([55cba19](https://github.com/KsoftmHub/arc-framework-v1/commit/55cba19a8fcb6092e384fa1ca8c3bc9778b20fcf))
+* updated ([6b0c7e4](https://github.com/KsoftmHub/arc-framework-v1/commit/6b0c7e44d3402667b20d96be663448b235bc712f))
+
+### Bug Fixes
+
+* **cli:** correct index parsing ([e46c34e](https://github.com/KsoftmHub/arc-framework-v1/commit/e46c34e2c14928b262c8f60e3acef19a5fcd0052))
+* **cli:** correct index parsing ([9fca8e2](https://github.com/KsoftmHub/arc-framework-v1/commit/9fca8e21c2e666636a633bea941f7b2c76df1914))
+* pipeline updated ([08b52e0](https://github.com/KsoftmHub/arc-framework-v1/commit/08b52e02552ff9d80a1050f31abf32e8bc59dfa8))
+
+# Changelog
+
 All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project adheres to
 [Semantic Versioning](https://semver.org/).
