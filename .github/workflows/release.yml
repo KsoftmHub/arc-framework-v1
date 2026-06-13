@@ -4,11 +4,11 @@ on:
   push:
     branches: [master]
 
+# OIDC dropped: publishing uses NPM_TOKEN only, so no id-token permission needed.
 permissions:
-  contents: write
-  issues: write
-  pull-requests: write
-  id-token: write
+  contents: write       # push the release commit + tag, create the GitHub Release
+  issues: write         # comment on released issues
+  pull-requests: write  # comment on released PRs
 
 concurrency:
   group: release
@@ -18,13 +18,12 @@ jobs:
   release:
     name: Release (semantic-release)
     runs-on: ubuntu-latest
-
+    # Don't run on the release commit semantic-release itself pushes.
     if: ${{ !contains(github.event.head_commit.message, '[skip ci]') }}
-
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0
+          fetch-depth: 0          # semantic-release needs full history + tags
           persist-credentials: false
 
       - uses: actions/setup-node@v4
@@ -32,11 +31,10 @@ jobs:
           node-version: 22
           registry-url: "https://registry.npmjs.org"
 
-      # Install dependencies
       - name: Install workspace
         run: npm ci || npm install
 
-      # Quality checks
+      # --- quality gate ---
       - name: Check template drift
         run: node tools/sync-templates.mjs --check
 
@@ -54,25 +52,56 @@ jobs:
         working-directory: packages/create-arc
         run: npm test
 
-      # Debug NPM authentication
-      - name: Verify NPM token exists
-        env:
-          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: |
-          if [ -z "$NPM_TOKEN" ]; then
-            echo "❌ NPM_TOKEN is missing"
-            exit 1
-          fi
-          echo "✅ NPM_TOKEN found"
-          echo "Token length: ${#NPM_TOKEN}"
-
-      - name: Verify NPM authentication
+      # --- npm auth + scope preflight (clear errors instead of a cryptic 404) ---
+      - name: Verify npm auth and scope access
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
-          npm whoami
+          if [ -z "${NODE_AUTH_TOKEN}" ]; then
+            echo "::error::NPM_TOKEN secret is empty. Add an npm Automation token as the NPM_TOKEN repo secret."
+            exit 1
+          fi
 
-      # Release
+          WHO="$(npm whoami 2>/dev/null || true)"
+          if [ -z "$WHO" ]; then
+            echo "::error::npm whoami failed — the NPM_TOKEN is invalid or expired. Generate a new Automation token."
+            exit 1
+          fi
+          echo "Authenticated to npm as: $WHO"
+
+          PKG_NAME="$(node -p "require('./packages/create-arc/package.json').name")"   # @ksoftm/create-arc
+          SCOPE="${PKG_NAME%%/*}"                                                       # @ksoftm
+          SCOPE_NAME="${SCOPE#@}"                                                       # ksoftm
+
+          # Already published? Then this token must have publish rights to it.
+          if npm view "$PKG_NAME" version >/dev/null 2>&1; then
+            echo "$PKG_NAME already exists on npm — semantic-release will publish the next version."
+            exit 0
+          fi
+
+          echo "$PKG_NAME is not published yet (first release)."
+          # For a brand-new SCOPED package, the scope (org or your username) must be
+          # publishable by this token. Check that the scope is usable.
+          if [ "$SCOPE_NAME" = "$WHO" ]; then
+            echo "Scope @$SCOPE_NAME matches your username — first publish will create the package."
+            exit 0
+          fi
+
+          # Scope differs from username → it must be an npm org you belong to.
+          if npm org ls "$SCOPE_NAME" >/dev/null 2>&1; then
+            echo "You are a member of npm org @$SCOPE_NAME — first publish can proceed."
+            exit 0
+          fi
+
+          echo "::error::Cannot publish the new scoped package '$PKG_NAME'."
+          echo "::error::Your npm user is '$WHO', but the scope is '@$SCOPE_NAME', which is not your username and not an org you can access with this token."
+          echo "::error::Fix one of these, then re-run:"
+          echo "::error::  (a) Create the npm org '@$SCOPE_NAME' at https://www.npmjs.com/org/create and add '$WHO' to it; or"
+          echo "::error::  (b) Bootstrap once locally: cd packages/create-arc && npm publish --access public; or"
+          echo "::error::  (c) Rename the package to your own scope '@$WHO/create-arc' (or an unscoped name) in packages/create-arc/package.json."
+          exit 1
+
+      # --- release ---
       - name: semantic-release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
