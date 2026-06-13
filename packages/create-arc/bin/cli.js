@@ -12,7 +12,7 @@
 
 import { execFileSync } from "node:child_process";
 import {
-  existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync,
+  existsSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync,
 } from "node:fs";
 import { basename, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -55,19 +55,24 @@ function detectOwner(dir) {
   return "user";
 }
 
-const BOOLEAN_FLAGS = new Set(["json", "help", "version"]);
+const BOOLEAN_FLAGS = new Set(["json", "help", "version", "fix", "force", "cancelled", "cancel"]);
+const REPEATABLE_FLAGS = new Set(["task"]);
 
 function parseArgv(argv) {
   const flags = {}; const pos = [];
+  const set = (key, val) => {
+    if (REPEATABLE_FLAGS.has(key)) (flags[key] ??= []).push(val);
+    else flags[key] = val;
+  };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a.startsWith("--")) {
       const eq = a.indexOf("=");
-      if (eq > -1) { flags[a.slice(2, eq)] = a.slice(eq + 1); continue; }
+      if (eq > -1) { set(a.slice(2, eq), a.slice(eq + 1)); continue; }
       const key = a.slice(2);
       const next = argv[i + 1];
       if (!BOOLEAN_FLAGS.has(key) && next !== undefined && !next.startsWith("--")) {
-        flags[key] = next; i++;            // --owner NAME form
+        set(key, next); i++;               // --owner NAME form
       } else flags[key] = true;            // --json / trailing flag form
     } else pos.push(a);
   }
@@ -90,6 +95,121 @@ function listArcFiles(arcDir) {
     ? readdirSync(d).filter((f) => /^ARC-\d+.*\.md$/.test(f)).sort().map((f) => join(d, f))
     : [];
   return { active: ls(arcDir), archived: ls(join(arcDir, "archive")) };
+}
+
+/* ---------------------- shared arc-mutation helpers ---------------------- */
+
+// Resolve a project dir's .arc, failing clearly if uninitialized.
+function arcDirOf(flags, target) {
+  const dir = resolve(flags?.dir ?? target ?? ".");
+  const arcDir = join(dir, ".arc");
+  return { dir, arcDir, exists: existsSync(arcDir) };
+}
+
+// Find an arc file by id ("ARC-0007" / "7" / "0007") or by a slug substring.
+// Searches active first, then archive. Returns { path, archived } or null.
+function findArc(arcDir, ref) {
+  const { active, archived } = listArcFiles(arcDir);
+  const all = [...active.map((p) => ({ p, archived: false })),
+               ...archived.map((p) => ({ p, archived: true }))];
+  if (!ref) return null;
+  const raw = String(ref).trim();
+  const num = raw.replace(/^ARC-/i, "").replace(/[^0-9]/g, "");
+  const id = num ? `ARC-${num.padStart(4, "0")}` : null;
+  // exact id match on filename
+  if (id) {
+    const hit = all.find(({ p }) => basename(p).toUpperCase().startsWith(id));
+    if (hit) return { path: hit.p, archived: hit.archived };
+  }
+  // slug substring match (case-insensitive), unique-or-first
+  const matches = all.filter(({ p }) => basename(p).toLowerCase().includes(raw.toLowerCase()));
+  if (matches.length) return { path: matches[0].p, archived: matches[0].archived };
+  return null;
+}
+
+// Set a frontmatter field, bump `updated` to today, and (optionally) sync the
+// INDEX.md row for this arc. Returns the new frontmatter values of interest.
+function updateArcFrontmatter(arcPath, changes) {
+  let text = readText(arcPath);
+  const fm = text.match(/^---\n([\s\S]*?)\n---/);
+  if (!fm) return fail(`${basename(arcPath)}: no YAML frontmatter`);
+  let front = fm[1];
+  for (const [k, v] of Object.entries(changes)) front = setField(front, k, v);
+  if (!("updated" in changes)) front = setField(front, "updated", today());
+  text = text.slice(0, fm.index) + `---\n${front}\n---` + text.slice(fm.index + fm[0].length);
+  writeFileSync(arcPath, text);
+  return front;
+}
+
+// Sync the INDEX.md row (status, plan v, updated) for a given arc id.
+function syncIndexRow(arcDir, id, { status, planVersion } = {}) {
+  const indexPath = join(arcDir, "INDEX.md");
+  if (!existsSync(indexPath)) return;
+  const lines = readText(indexPath).split("\n");
+  let changed = false;
+  for (let i = 0; i < lines.length; i++) {
+    const cells = lines[i].split("|");
+    if (cells.length >= 8 && cells[1].trim().toUpperCase() === id) {
+      if (status !== undefined) cells[3] = ` ${status} `;
+      if (planVersion !== undefined) cells[4] = ` ${planVersion} `;
+      cells[5] = ` ${today()} `;
+      lines[i] = cells.join("|");
+      changed = true;
+      break;
+    }
+  }
+  if (changed) writeFileSync(indexPath, lines.join("\n"));
+}
+
+// Move an arc row from the Active table to the Archived table in INDEX.md.
+function moveIndexRowToArchived(arcDir, id, outcome) {
+  const indexPath = join(arcDir, "INDEX.md");
+  if (!existsSync(indexPath)) return;
+  const lines = readText(indexPath).split("\n");
+  const archivedHeadIdx = lines.findIndex((l) => /^##\s+Archived/i.test(l));
+  let rowIdx = -1;
+  for (let i = 0; i < lines.length; i++) {
+    if (archivedHeadIdx !== -1 && i >= archivedHeadIdx) break;
+    const cells = lines[i].split("|");
+    if (cells.length >= 8 && cells[1].trim().toUpperCase() === id) { rowIdx = i; break; }
+  }
+  if (rowIdx === -1) return;
+  const cells = lines[rowIdx].split("|");
+  const title = cells[2].trim();
+  const file = cells[7].trim();   // [name](path)
+  const archivedRow = `| ${id} | ${title} | ${outcome} | ${today()} | ${file} |`;
+  lines.splice(rowIdx, 1);                     // remove from Active
+  // re-find Archived head (index shifted), then drop a placeholder "— | —" row if present
+  let head = lines.findIndex((l) => /^##\s+Archived/i.test(l));
+  if (head === -1) { lines.push("", "## Archived", "", "| ID | Title | Outcome | Closed | File |", "|---|---|---|---|---|"); head = lines.length - 2; }
+  // insert after the Archived table separator (first |---| after head)
+  let sep = -1;
+  for (let i = head + 1; i < lines.length; i++) {
+    if (/^\|?\s*:?-{2,}/.test(lines[i])) { sep = i; break; }
+  }
+  const insertAt = sep !== -1 ? sep : head;
+  // remove an empty placeholder archived row ("| — | — | …")
+  if (lines[insertAt + 1] && /^\|\s*—\s*\|/.test(lines[insertAt + 1])) lines.splice(insertAt + 1, 1);
+  lines.splice(insertAt + 1, 0, archivedRow);
+  writeFileSync(indexPath, lines.join("\n"));
+}
+
+// Append a worklog entry under "## 5 · Worklog".
+function appendWorklog(arcPath, note) {
+  let text = readText(arcPath);
+  const stamp = new Date().toISOString().slice(0, 16).replace("T", " ");
+  const entry = `\n### ${stamp} — ${note}\n`;
+  const m = text.match(/^## 5 · Worklog\n/m);
+  if (!m) { writeFileSync(arcPath, text + entry); return; }
+  // insert right after the Worklog heading (and its leading HTML comment if present)
+  const afterHead = m.index + m[0].length;
+  text = text.slice(0, afterHead) + entry + text.slice(afterHead);
+  writeFileSync(arcPath, text);
+}
+
+// Get the current plan_version int from an arc.
+function planVersionOf(arcPath) {
+  return parseInt(field(frontmatter(readText(arcPath)), "plan_version", "1"), 10) || 1;
 }
 
 /* -------------------------------- commands ------------------------------- */
@@ -160,6 +280,18 @@ function cmdNew(title, flags) {
     front = setField(front, "tags", `[${tags}]`);
   }
   body = body.replace("# ARC-0000 · <Title>", `# ${id} · ${title}`);
+
+  // Optional prefill: --goal sets the Plan goal line; --task adds first tasks.
+  if (flags.goal) {
+    body = body.replace(/\*\*Goal:\*\* <[^>]*>/, `**Goal:** ${String(flags.goal).trim()}`);
+  }
+  const tasks = flags.task ? (Array.isArray(flags.task) ? flags.task : [flags.task]) : [];
+  if (tasks.length) {
+    const block = tasks.map((t, i) => `- [ ] T${i + 1} ${String(t).trim()}`).join("\n");
+    // Replace the placeholder "- [ ] T1 <…>" lines under "## 4 · Tasks" with real tasks.
+    body = body.replace(/^- \[ \] T\d+ <[^>]*>(?:\n- \[ \] T\d+ <[^>]*>)*/m, block);
+  }
+
   writeFileSync(dest, `---\n${front}\n---\n${body}`);
 
   // update the index: bump next_id, insert registry row
@@ -272,16 +404,18 @@ function cmdStatus(target, flags) {
   return 0;
 }
 
-function cmdDoctor(target) {
-  const dir = resolve(target ?? ".");
+function cmdDoctor(target, flags = {}) {
+  const dir = resolve(flags.dir ?? target ?? ".");
   const arcDir = join(dir, ".arc");
   const indexPath = join(arcDir, "INDEX.md");
-  let failures = 0, warnings = 0;
+  const doFix = !!flags.fix;
+  let failures = 0, warnings = 0, fixed = 0;
   const ok = (msg) => console.log(`  OK    ${msg}`);
   const bad = (msg) => { console.log(`  FAIL  ${msg}`); failures++; };
   const warn = (msg) => { console.log(`  WARN  ${msg}`); warnings++; };
+  const fix = (msg) => { console.log(`  FIX   ${msg}`); fixed++; };
 
-  if (!existsSync(arcDir)) return fail(`${arcDir} not found — run \`create-arc init\` first`);
+  if (!existsSync(arcDir)) return fail(`${arcDir} not found — run \`arc init\` first`);
   if (!existsSync(indexPath)) { bad(".arc/INDEX.md missing"); return finish(); }
 
   const index = readText(indexPath);
@@ -292,19 +426,39 @@ function cmdDoctor(target) {
   const nm = index.match(/^next_id:\s*ARC-(\d+)\s*$/m);
   const maxId = Math.max(-1, ...all.map(({ p }) => parseInt(basename(p).match(/^ARC-(\d+)/)?.[1] ?? "-1", 10)));
   if (!nm) bad("next_id missing or malformed in INDEX.md");
-  else if (parseInt(nm[1], 10) <= maxId) bad(`next_id ARC-${nm[1]} is not greater than highest existing arc ARC-${String(maxId).padStart(4, "0")}`);
-  else ok(`next_id ARC-${nm[1]} > highest arc id`);
+  else if (parseInt(nm[1], 10) <= maxId) {
+    if (doFix) {
+      const next = `ARC-${String(maxId + 1).padStart(4, "0")}`;
+      writeFileSync(indexPath, readText(indexPath).replace(/^next_id:\s*ARC-\d+\s*$/m, `next_id: ${next}`));
+      fix(`next_id → ${next} (was ARC-${nm[1]})`);
+    } else bad(`next_id ARC-${nm[1]} is not greater than highest existing arc ARC-${String(maxId).padStart(4, "0")}`);
+  } else ok(`next_id ARC-${nm[1]} > highest arc id`);
+
+  // index row status map (id → status cell), for status-drift repair
+  const rowStatus = new Map();
+  for (const line of index.split("\n")) {
+    const cells = line.split("|");
+    if (cells.length >= 8 && /^ARC-\d{4}$/.test(cells[1].trim())) rowStatus.set(cells[1].trim(), cells[3].trim());
+  }
 
   // file <-> index bijection, frontmatter integrity
   const indexIds = new Set([...index.matchAll(/^\|\s*(ARC-\d{4})\s*\|/gm)].map((x) => x[1]));
-  for (const { p } of all) {
+  for (const { p, archived: isArch } of all) {
     const fileId = basename(p).match(/^(ARC-\d{4})/)?.[1];
     const front = frontmatter(readText(p));
     const fmId = field(front, "id");
     const status = field(front, "status");
-    if (fmId !== fileId) bad(`${basename(p)}: frontmatter id '${fmId}' != filename id '${fileId}'`);
+    if (fmId !== fileId) {
+      if (doFix) { updateArcFrontmatter(p, { id: fileId }); fix(`${basename(p)}: frontmatter id '${fmId}' → '${fileId}'`); }
+      else bad(`${basename(p)}: frontmatter id '${fmId}' != filename id '${fileId}'`);
+    }
     if (!VALID_STATUSES.has(status)) bad(`${basename(p)}: invalid status '${status}'`);
     if (!indexIds.has(fileId)) bad(`${basename(p)}: no row in INDEX.md`);
+    // status drift: active arc's index cell disagrees with its frontmatter
+    else if (!isArch && VALID_STATUSES.has(status) && rowStatus.get(fileId) && rowStatus.get(fileId) !== status) {
+      if (doFix) { syncIndexRow(arcDir, fileId, { status }); fix(`${fileId}: index status '${rowStatus.get(fileId)}' → '${status}'`); }
+      else warn(`${fileId}: index status '${rowStatus.get(fileId)}' != frontmatter '${status}' (use --fix)`);
+    }
     const inProg = [...readText(p).matchAll(/^- \[>\]/gm)].length;
     if (inProg > 2) warn(`${basename(p)}: ${inProg} tasks marked [>] — keep at most 1–2 in progress`);
   }
@@ -315,11 +469,166 @@ function cmdDoctor(target) {
   return finish();
 
   function finish() {
+    const fx = fixed ? `, ${fixed} fixed` : "";
     console.log(failures
-      ? `\ndoctor: ${failures} problem(s), ${warnings} warning(s)`
-      : `\ndoctor: healthy (${warnings} warning(s))`);
+      ? `\ndoctor: ${failures} problem(s), ${warnings} warning(s)${fx}`
+      : `\ndoctor: healthy (${warnings} warning(s)${fx})`);
     return failures ? 1 : 0;
   }
+}
+
+/* ------------------------ lifecycle / task commands ----------------------- */
+
+// Shared: resolve an arc by reference for a mutating command.
+function resolveForMutation(ref, flags) {
+  const { arcDir, exists } = arcDirOf(flags);
+  if (!exists) return { err: fail("`.arc` not found — run `arc init` first") };
+  if (!ref) return { err: fail("which arc? pass an id or slug, e.g. `ARC-0007` or `rate-limit`") };
+  const found = findArc(arcDir, ref);
+  if (!found) return { err: fail(`no arc matching '${ref}' (try \`arc status\` to list them)`) };
+  const id = basename(found.path).match(/^(ARC-\d{4})/)?.[1];
+  return { arcDir, path: found.path, archived: found.archived, id };
+}
+
+function setStatus(ref, flags, status, { note } = {}) {
+  const r = resolveForMutation(ref, flags);
+  if (r.err) return r.err;
+  if (r.archived) return fail(`${r.id} is archived — restore it first`);
+  updateArcFrontmatter(r.path, { status });
+  syncIndexRow(r.arcDir, r.id, { status });
+  if (note) appendWorklog(r.path, note);
+  console.log(`${r.id} → ${status}`);
+  return 0;
+}
+
+const cmdStart = (ref, flags) => setStatus(ref, flags, "in-progress", { note: "started (status → in-progress)" });
+const cmdReview = (ref, flags) => setStatus(ref, flags, "review", { note: "moved to review" });
+
+function cmdBlock(ref, flags) {
+  const reason = flags.reason || flags.r;
+  return setStatus(ref, flags, "blocked", {
+    note: reason ? `blocked: ${reason}` : "blocked",
+  });
+}
+
+function cmdDone(ref, flags) {
+  const r = resolveForMutation(ref, flags);
+  if (r.err) return r.err;
+  if (r.archived) { console.log(`${r.id} is already archived`); return 0; }
+  updateArcFrontmatter(r.path, { status: "done" });
+  appendWorklog(r.path, "completed (status → done)");
+  // move file into archive/ and move the INDEX row to Archived
+  const archiveDir = join(r.arcDir, "archive");
+  mkdirSync(archiveDir, { recursive: true });
+  const destPath = join(archiveDir, basename(r.path));
+  renameSync(r.path, destPath);
+  moveIndexRowToArchived(r.arcDir, r.id, "done");
+  console.log(`${r.id} → done · moved to .arc/archive/${basename(r.path)}`);
+  return 0;
+}
+
+function cmdArchive(ref, flags) {
+  const r = resolveForMutation(ref, flags);
+  if (r.err) return r.err;
+  if (r.archived) { console.log(`${r.id} is already archived`); return 0; }
+  const outcome = flags.cancelled || flags.cancel ? "cancelled" : "done";
+  if (outcome === "cancelled") {
+    updateArcFrontmatter(r.path, { status: "cancelled" });
+    appendWorklog(r.path, flags.reason ? `cancelled: ${flags.reason}` : "cancelled");
+  }
+  const archiveDir = join(r.arcDir, "archive");
+  mkdirSync(archiveDir, { recursive: true });
+  renameSync(r.path, join(archiveDir, basename(r.path)));
+  moveIndexRowToArchived(r.arcDir, r.id, outcome);
+  console.log(`${r.id} → ${outcome} · archived`);
+  return 0;
+}
+
+// arc task <ref> <n> [done|start|block|cancel|pending]  — toggle one task marker
+// arc task <ref> --add "text"                            — append a new task
+function cmdTask(ref, flags, rest) {
+  const r = resolveForMutation(ref, flags);
+  if (r.err) return r.err;
+  let text = readText(r.path);
+  const secRe = /(^## 4 · Tasks\n)([\s\S]*?)(?=^## |\Z)/m;
+  const sec = text.match(secRe);
+  if (!sec) return fail(`${r.id}: no "## 4 · Tasks" section`);
+  let body = sec[2];
+
+  if (flags.add) {
+    const nums = [...body.matchAll(/^- \[[ >x!-]\]\s*T(\d+)/gm)].map((m) => parseInt(m[1], 10));
+    const next = (nums.length ? Math.max(...nums) : 0) + 1;
+    const line = `- [ ] T${next} ${String(flags.add).trim()}\n`;
+    body = body.replace(/\n*$/, "\n") + line;
+    text = text.slice(0, sec.index) + sec[1] + body + text.slice(sec.index + sec[0].length);
+    writeFileSync(r.path, text);
+    updateArcFrontmatter(r.path, {});
+    console.log(`${r.id}: added T${next}`);
+    return 0;
+  }
+
+  const n = rest?.[0];
+  const action = (rest?.[1] || "done").toLowerCase();
+  if (!n) return fail("usage: arc task <arc> <task-number> [done|start|block|cancel|pending]  (or --add \"text\")");
+  const marker = { done: "x", start: ">", block: "!", cancel: "-", pending: " " }[action];
+  if (marker === undefined) return fail(`unknown task action '${action}'`);
+  const tnum = String(n).replace(/[^0-9]/g, "");
+  const re = new RegExp(`^(- \\[)[ >x!-](\\]\\s*T${tnum}\\b.*)$`, "m");
+  if (!re.test(body)) return fail(`${r.id}: task T${tnum} not found`);
+  body = body.replace(re, `$1${marker}$2`);
+  text = text.slice(0, sec.index) + sec[1] + body + text.slice(sec.index + sec[0].length);
+  writeFileSync(r.path, text);
+  updateArcFrontmatter(r.path, {});
+  console.log(`${r.id}: T${tnum} → [${marker}]`);
+  return 0;
+}
+
+// arc show <ref> — print one arc's plan, tasks, and status notes.
+function cmdShow(ref, flags) {
+  const r = resolveForMutation(ref, flags);
+  if (r.err) return r.err;
+  const text = readText(r.path);
+  const a = parseArc(r.path, r.archived);
+  const sec = (n, title) => text.match(new RegExp(`^## ${n} · ${title}\\n([\\s\\S]*?)(?=^## |\\Z)`, "m"))?.[1]?.trim() ?? "";
+  console.log(`${a.id} · ${a.title}`);
+  console.log(`status: ${a.status}${r.archived ? " (archived)" : ""} · plan v${a.plan_version} · tasks ${a.tasks_total ? `${a.tasks_done}/${a.tasks_total}` : "—"} · updated ${a.updated}`);
+  const plan = sec(2, "Plan \\(current[^)]*\\)") || sec(2, "Plan.*");
+  if (plan) { console.log("\n— Plan —"); console.log(plan.replace(/<!--[\s\S]*?-->/g, "").trim()); }
+  const tasks = sec(4, "Tasks");
+  if (tasks) { console.log("\n— Tasks —"); console.log(tasks.replace(/<!--[\s\S]*?-->/g, "").trim()); }
+  const notes = sec(6, "Status Notes");
+  if (notes) { console.log("\n— Status —"); console.log(notes.replace(/<!--[\s\S]*?-->/g, "").trim()); }
+  console.log(`\nfile: ${r.path}`);
+  return 0;
+}
+
+// arc next — suggest what to work on (active_focus, then in-progress, then planned).
+function cmdNext(flags) {
+  const { arcDir, exists } = arcDirOf(flags);
+  if (!exists) return fail("`.arc` not found — run `arc init` first");
+  const { active } = listArcFiles(arcDir);
+  if (!active.length) return (console.log("no active arcs — `arc new \"Title\"` to begin"), 0);
+  const arcs = active.map((p) => parseArc(p, false))
+    // The standing maintenance arc (ARC-0000) is always in-progress; only surface
+    // it as "next" when it actually has unfinished tasks and nothing else is active.
+    .filter((a) => !(a.id === "ARC-0000" && a.tasks_in_progress === 0));
+  if (!arcs.length) return (console.log("no actionable arcs — `arc new \"Title\"` to begin"), 0);
+  const idx = existsSync(join(arcDir, "INDEX.md")) ? readText(join(arcDir, "INDEX.md")) : "";
+  const focus = idx.match(/^active_focus:\s*(.+)$/m)?.[1]?.trim();
+
+  const byStatus = (s) => arcs.filter((a) => a.status === s);
+  const pick =
+    (focus && focus !== "—" && arcs.find((a) => a.id === focus || a.title.includes(focus))) ||
+    byStatus("in-progress")[0] || byStatus("refining")[0] ||
+    byStatus("planned")[0] || byStatus("review")[0] || byStatus("draft")[0];
+
+  if (!pick) { console.log("nothing actionable — all arcs are blocked or done"); return 0; }
+  console.log(`next: ${pick.id} · ${pick.title}  [${pick.status}]`);
+  console.log(`  tasks ${pick.tasks_total ? `${pick.tasks_done}/${pick.tasks_total}` : "—"}${pick.tasks_blocked ? ` · ${pick.tasks_blocked} blocked` : ""}`);
+  console.log(`  open:  arc show ${pick.id}`);
+  const blocked = byStatus("blocked");
+  if (blocked.length) console.log(`  (blocked: ${blocked.map((a) => a.id).join(", ")})`);
+  return 0;
 }
 
 /* --------------------------------- main ----------------------------------- */
@@ -335,7 +644,7 @@ const ARC_COMMANDS = {
 
 "$ARGUMENTS"
 
-Steps: read .arc/INDEX.md; if an open arc already covers this, append the instruction verbatim and refine its plan; otherwise create a new arc (use \`npx @ksoftm/create-arc new "<short title>"\`, or create the file from .arc/_TEMPLATE.md and register it in INDEX.md). Record the raw instruction verbatim, draft the Plan with checkable acceptance criteria, and list the Tasks. Do not start coding until the plan is acknowledged.`,
+Steps: run \`arc status\` to see existing arcs; if an open arc already covers this, append the instruction verbatim and refine its plan; otherwise create a new arc with \`arc new "<short title>" --goal "<one-line goal>" --task "<first task>" --task "<next task>"\`. Then record the raw instruction verbatim in §1, finish the Plan with checkable acceptance criteria, and refine the Tasks. Do not start coding until the plan is acknowledged.`,
   },
   "arc-refine": {
     desc: "ARC: fold a new instruction into an existing arc (Refine)",
@@ -347,7 +656,7 @@ Append it verbatim as the next Raw Instruction, add a Refinement Log entry (new 
   },
   "arc-build": {
     desc: "ARC: do the work for the active arc (Read Before / Update After Editing)",
-    body: `Read ./ARC.md. Before editing: read .arc/INDEX.md, fully read the arc(s) covering the files you'll touch, and read the real source files. Work the task list in order, marking one task in progress. After editing: advance task states, append a Worklog entry (tasks, files read, files changed, summary, decisions, follow-ups), update the arc frontmatter and its INDEX row, and reference the arc id in the commit. An edit without a worklog entry is unfinished.
+    body: `Read ./ARC.md. Before editing: run \`arc status\` (or read .arc/INDEX.md), fully read the arc(s) covering the files you'll touch, and read the real source files. Mark a task in progress with \`arc task <arc> <n> start\`, do the work, then tick it with \`arc task <arc> <n> done\`. After editing: append a Worklog entry (tasks, files read, files changed, summary, decisions, follow-ups), keep the arc's Status Notes current, and reference the arc id in the commit. When the arc is finished, run \`arc done <arc>\` to mark it done and archive it. An edit without a worklog entry is unfinished.
 
 Focus: $ARGUMENTS`,
   },
@@ -404,22 +713,71 @@ function cmdAgentInit(flags) {
   return 0;
 }
 
-function help() {
+const COMMAND_HELP = {
+  init: `arc init [dir] [--owner=NAME]
+  Scaffold ARC.md + .arc/ in dir (default: current). Idempotent — never overwrites.
+  --owner NAME   arc owner (default: git config user.name)`,
+  new: `arc new "Short imperative title" [options]
+  Create the next arc and register it in INDEX.md.
+  --goal "…"     prefill the Plan goal line
+  --task "…"     add a first task (repeatable: --task a --task b)
+  --tags a,b     frontmatter tags
+  --owner NAME   arc owner
+  --dir DIR      project dir (default: current)`,
+  start: `arc start <arc>
+  Set an arc to in-progress and log it. <arc> is an id or slug (e.g. ARC-0007 or rate-limit).`,
+  done: `arc done <arc>
+  Mark an arc done, log it, move the file to .arc/archive/, and move its INDEX row to Archived.`,
+  block: `arc block <arc> [--reason "…"]
+  Set an arc to blocked, recording the reason in the worklog.`,
+  archive: `arc archive <arc> [--cancelled] [--reason "…"]
+  Archive an arc. Default outcome is "done"; --cancelled archives it as cancelled.`,
+  task: `arc task <arc> <n> [done|start|block|cancel|pending]
+  Toggle task T<n>'s marker. Default action is "done".
+  arc task <arc> --add "text"   append a new task`,
+  show: `arc show <arc>
+  Print one arc's plan, tasks, and status notes.`,
+  next: `arc next
+  Suggest what to work on (active_focus → in-progress → planned).`,
+  status: `arc status [dir] [--json]
+  Table of every arc: id, status, plan version, task progress.`,
+  doctor: `arc doctor [dir] [--fix]
+  Consistency checks (exit 1 on problems). --fix auto-repairs index/status drift.`,
+  "agent-init": `arc agent-init [--agents=a,b] [--force]
+  Write /arc-* slash commands for AI agents (agents: ${Object.keys(AGENT_TARGETS).join(", ")}; default: all).`,
+};
+
+function help(topic) {
+  if (topic && COMMAND_HELP[topic]) { console.log(COMMAND_HELP[topic]); return 0; }
   console.log(`create-arc v${PKG.version} — ARC plan-driven development (Align → Refine → Construct)
 (alias: \`arc\`)
 
-Usage:
-  arc init [dir] [--owner=NAME]            scaffold ARC.md + .arc/ (idempotent)
-  arc new "Title" [--dir=.] [--tags=a,b]   create + register the next arc
-  arc status [dir] [--json]                status table across all arcs
-  arc doctor [dir]                         consistency checks (exit 1 on problems)
-  arc agent-init [--agents=a,b] [--force]  write /slash commands for AI agents
-                                           (agents: ${ALL_AGENTS.join(", ")}; default: all)
+Setup
+  init [dir]                 scaffold ARC.md + .arc/ (idempotent)
+  agent-init [--agents=…]    write /arc-* slash commands for AI agents
 
-Run with npx (no install): npx @ksoftm/create-arc <command>
-Install globally:          npm i -g @ksoftm/create-arc   then: arc <command>
-Project dev dependency:    npm i -D @ksoftm/create-arc   then: npx arc <command>
+Capture & plan
+  new "Title" [--goal …] [--task …] [--tags a,b]
+                             create + register the next arc
 
+Work the arc
+  start <arc>                → in-progress
+  task <arc> <n> [action]    tick a task ([done]/start/block/cancel/pending); --add "text"
+  block <arc> [--reason …]   → blocked
+  done <arc>                 → done + archive (file + index row)
+  archive <arc> [--cancelled]
+
+Inspect
+  status [dir] [--json]      table of every arc
+  show <arc>                 one arc's plan, tasks, status
+  next                       what to work on next
+  doctor [dir] [--fix]       consistency checks (+ auto-repair)
+
+<arc> is an id or slug: ARC-0007, 7, or a slug substring like "rate-limit".
+Per-command help:  arc help <command>   (e.g. arc help new)
+
+Run with npx: npx @ksoftm/create-arc <command>
+Install:      npm i -g @ksoftm/create-arc   then use \`arc\`
 Protocol reference: ARC.md in your project root after init.`);
   return 0;
 }
@@ -427,14 +785,25 @@ Protocol reference: ARC.md in your project root after init.`);
 const { pos, flags } = parseArgv(process.argv.slice(2));
 const cmd = pos[0];
 
+// per-command help: `arc help new` or `arc new --help`
+if (flags.help && cmd && cmd !== "help") { process.exit(help(cmd)); }
+
 let code;
 if (flags.version || cmd === "version") { console.log(PKG.version); code = 0; }
-else if (!cmd || cmd === "help" || flags.help) code = help();
+else if (!cmd || cmd === "help") code = help(pos[1]);
 else if (cmd === "init") code = cmdInit(pos[1], flags);
 else if (cmd === "new") code = cmdNew(pos.slice(1).join(" "), flags);
 else if (cmd === "status") code = cmdStatus(pos[1], flags);
-else if (cmd === "doctor") code = cmdDoctor(pos[1]);
+else if (cmd === "doctor") code = cmdDoctor(pos[1], flags);
 else if (cmd === "agent-init" || cmd === "agents") code = cmdAgentInit(flags);
+else if (cmd === "start") code = cmdStart(pos[1], flags);
+else if (cmd === "done") code = cmdDone(pos[1], flags);
+else if (cmd === "block") code = cmdBlock(pos[1], flags);
+else if (cmd === "review") code = cmdReview(pos[1], flags);
+else if (cmd === "archive") code = cmdArchive(pos[1], flags);
+else if (cmd === "task") code = cmdTask(pos[1], flags, pos.slice(2));
+else if (cmd === "show" || cmd === "view") code = cmdShow(pos[1], flags);
+else if (cmd === "next") code = cmdNext(flags);
 else code = fail(`unknown command '${cmd}' — try: arc help`);
 
 process.exit(code);

@@ -171,6 +171,130 @@ test("agent-init --agents filters to selected agents", () => {
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+test("new --goal and --task prefill the plan and tasks", () => {
+  const dir = fresh();
+  try {
+    run(dir, ["init"]);
+    run(dir, ["new", "rate limiting", "--goal", "per-key limits", "--task", "design", "--task", "wire it"]);
+    const arc = readFileSync(join(dir, ".arc/ARC-0001-rate-limiting.md"), "utf8");
+    assert.match(arc, /\*\*Goal:\*\* per-key limits/);
+    assert.match(arc, /- \[ \] T1 design/);
+    assert.match(arc, /- \[ \] T2 wire it/);
+    assert.doesNotMatch(arc, /T1 <…>/, "placeholder tasks should be replaced");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("start moves an arc to in-progress and syncs the index", () => {
+  const dir = fresh();
+  try {
+    run(dir, ["init"]);
+    run(dir, ["new", "feature x"]);
+    run(dir, ["start", "1"]);
+    assert.match(readFileSync(join(dir, ".arc/ARC-0001-feature-x.md"), "utf8"), /^status: in-progress/m);
+    const idx = readFileSync(join(dir, ".arc/INDEX.md"), "utf8");
+    assert.match(idx, /\| ARC-0001 \| feature x \| in-progress \|/);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("task ticks markers and --add appends a task", () => {
+  const dir = fresh();
+  try {
+    run(dir, ["init"]);
+    run(dir, ["new", "feature y", "--task", "one", "--task", "two"]);
+    run(dir, ["task", "1", "1", "done"]);
+    run(dir, ["task", "1", "2", "start"]);
+    run(dir, ["task", "1", "--add", "three"]);
+    const arc = readFileSync(join(dir, ".arc/ARC-0001-feature-y.md"), "utf8");
+    assert.match(arc, /- \[x\] T1 one/);
+    assert.match(arc, /- \[>\] T2 two/);
+    assert.match(arc, /- \[ \] T3 three/);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("block records the reason in the worklog", () => {
+  const dir = fresh();
+  try {
+    run(dir, ["init"]);
+    run(dir, ["new", "feature z"]);
+    run(dir, ["block", "1", "--reason", "waiting on redis"]);
+    const arc = readFileSync(join(dir, ".arc/ARC-0001-feature-z.md"), "utf8");
+    assert.match(arc, /^status: blocked/m);
+    assert.match(arc, /blocked: waiting on redis/);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("done marks done, moves the file to archive, and moves the index row", () => {
+  const dir = fresh();
+  try {
+    run(dir, ["init"]);
+    run(dir, ["new", "shippable"]);
+    run(dir, ["done", "1"]);
+    assert.ok(!existsSync(join(dir, ".arc/ARC-0001-shippable.md")), "file should leave .arc/");
+    assert.ok(existsSync(join(dir, ".arc/archive/ARC-0001-shippable.md")), "file should be in archive/");
+    const idx = readFileSync(join(dir, ".arc/INDEX.md"), "utf8");
+    const active = idx.split("## Archived")[0];
+    const archived = idx.split("## Archived")[1];
+    assert.doesNotMatch(active, /ARC-0001/, "row should leave Active");
+    assert.match(archived, /\| ARC-0001 \| shippable \| done \|/, "row should be in Archived");
+    // index still consistent after archiving
+    run(dir, ["doctor"]);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("archive --cancelled archives with cancelled outcome", () => {
+  const dir = fresh();
+  try {
+    run(dir, ["init"]);
+    run(dir, ["new", "abandoned"]);
+    run(dir, ["archive", "1", "--cancelled", "--reason", "wont fix"]);
+    assert.ok(existsSync(join(dir, ".arc/archive/ARC-0001-abandoned.md")));
+    assert.match(readFileSync(join(dir, ".arc/INDEX.md"), "utf8"), /\| ARC-0001 \| abandoned \| cancelled \|/);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("show resolves an arc by slug substring", () => {
+  const dir = fresh();
+  try {
+    run(dir, ["init"]);
+    run(dir, ["new", "the login flow"]);
+    const out = run(dir, ["show", "login"]);
+    assert.match(out, /ARC-0001 · the login flow/);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("next skips the standing maintenance arc and picks real work", () => {
+  const dir = fresh();
+  try {
+    run(dir, ["init"]);
+    run(dir, ["new", "real work"]);
+    const out = run(dir, ["next"]);
+    assert.match(out, /next: ARC-0001 · real work/);
+    assert.doesNotMatch(out, /next: ARC-0000/);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("doctor --fix repairs index status drift", () => {
+  const dir = fresh();
+  try {
+    run(dir, ["init"]);
+    run(dir, ["new", "drifter"]);
+    run(dir, ["start", "1"]);
+    // corrupt the index row's status back to draft
+    const idxPath = join(dir, ".arc/INDEX.md");
+    writeFileSync(idxPath, readFileSync(idxPath, "utf8").replace("| in-progress |", "| draft |"));
+    run(dir, ["doctor", "--fix"]);
+    assert.match(readFileSync(idxPath, "utf8"), /\| ARC-0001 \| drifter \| in-progress \|/);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("per-command help prints for a topic and via --help", () => {
+  const dir = fresh();
+  try {
+    assert.match(run(dir, ["help", "new"]), /arc new/);
+    assert.match(run(dir, ["start", "--help"]), /arc start <arc>/);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
 test("version prints the package version", () => {
   const out = run(process.cwd(), ["--version"]).trim();
   assert.match(out, /^\d+\.\d+\.\d+$/);
