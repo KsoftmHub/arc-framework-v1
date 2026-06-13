@@ -3,6 +3,12 @@
 All notable changes to this project are documented here. This file is
 automatically maintained by semantic-release from Conventional Commits.
 
+## [1.2.0](https://github.com/KsoftmHub/arc-framework-v1/compare/v1.1.0...v1.2.0) (2026-06-13)
+
+### Features
+
+* **cli:** add lifecycle/task commands, doctor --fix, new prefill, per-command help ([f5ce5fb](https://github.com/KsoftmHub/arc-framework-v1/commit/f5ce5fb2a4aa6cbf7ce7c6d37c4f7057fa1c8012))
+
 ## [1.1.0](https://github.com/KsoftmHub/arc-framework-v1/compare/v1.0.7...v1.1.0) (2026-06-13)
 
 ### Features
